@@ -23,5 +23,9 @@ anthropic
 groq
 mistralai
 openai
+scikit-learn
+hmmlearn
+river
+requests
 tweepy
 textblob
