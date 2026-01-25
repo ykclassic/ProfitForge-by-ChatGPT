@@ -1,31 +1,75 @@
+# trainer_daemon.py
 import time
+import sqlite3
+import requests
+import ccxt
 import numpy as np
 import pandas as pd
-from models.online_model import OnlineModel
-from models.regime_hmm import detect_regimes
-from risk.drift_adwin import DriftDetector
-from risk.bet_sizing import fractional_kelly
+from sklearn.linear_model import SGDClassifier
+from hmmlearn.hmm import GaussianHMM
+from river.drift import ADWIN
+from datetime import datetime, timezone
 
-model = OnlineModel()
-drift = DriftDetector()
+DISCORD_WEBHOOK = "YOUR_DISCORD_WEBHOOK"
 
-while True:
-    df = pd.read_csv("latest_features.csv", index_col=0, parse_dates=True)
+DB_PATH = "data/trading.db"
 
-    df = detect_regimes(df)
+exchange = ccxt.gateio()
 
-    X = df[["open","high","low","close","volume"]].values
-    y = (df["close"].shift(-1) > df["close"]).astype(int).values[:-1]
+model = SGDClassifier(loss="log_loss")
+meta_model = SGDClassifier(loss="log_loss")
+drift_detector = ADWIN()
 
-    model.update(X[:-1], y)
+hmm = GaussianHMM(n_components=3, covariance_type="full")
 
-    probs = model.predict_proba(X[-1].reshape(1, -1))[0][1]
-    error = int(probs < 0.5)
+def send_discord(msg):
+    requests.post(DISCORD_WEBHOOK, json={"content": msg})
 
-    if drift.update(error):
-        print("⚠️ Concept drift detected — suppressing signals")
+def fetch_data(symbol="BTC/USDT", timeframe="1h", limit=300):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])
+    df["ret"] = df["c"].pct_change()
+    return df.dropna()
 
-    bet = fractional_kelly(probs, avg_win=1.2, avg_loss=1.0)
-    print(f"Confidence={probs:.3f} | Bet size={bet:.3f}")
+def classify_regime(df):
+    X = df[["ret"]].values
+    hmm.fit(X)
+    df["regime"] = hmm.predict(X)
+    return df
 
-    time.sleep(60)
+def train_and_signal():
+    df = fetch_data()
+    df = classify_regime(df)
+
+    X = df[["ret"]].values
+    y = (df["ret"].shift(-1) > 0).astype(int).values[:-1]
+    X = X[:-1]
+
+    model.partial_fit(X, y, classes=[0,1])
+    probs = model.predict_proba(X)[-1][1]
+
+    drift_detector.update(int(probs < 0.5))
+    if drift_detector.drift_detected:
+        send_discord("⚠️ Concept drift detected. Model adapting.")
+
+    entry = df["c"].iloc[-1]
+    stop = entry * 0.99
+    tp = entry * 1.02
+
+    msg = (
+        f"📈 **BTC Signal**\n"
+        f"Entry: {entry:.2f}\n"
+        f"SL: {stop:.2f}\n"
+        f"TP: {tp:.2f}\n"
+        f"Confidence: {probs:.2%}\n"
+        f"Regime: {df['regime'].iloc[-1]}"
+    )
+    send_discord(msg)
+
+def main():
+    while True:
+        train_and_signal()
+        time.sleep(3600)
+
+if __name__ == "__main__":
+    main()
