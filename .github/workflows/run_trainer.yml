@@ -1,0 +1,36 @@
+name: Run Trainer
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # every hour
+  workflow_dispatch:
+
+jobs:
+  run_trainer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Crucial for pushing DB changes back
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+          
+      - name: Install dependencies
+        run: |
+          pip install pandas ccxt scikit-learn hmmlearn river requests
+          
+      - name: Run trainer
+        run: python trainer_daemon.py
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+
+      - name: Commit and Push changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add data/trading.db
+          git commit -m "Update trading database [skip ci]" || echo "No changes to commit"
+          git push
