@@ -9,10 +9,32 @@ from datetime import datetime, timezone
 
 # --- Config ---
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
-DB_PATH = "data/trading.db"
+DB_DIR = "data"
+DB_PATH = os.path.join(DB_DIR, "trading.db")
 
-if not os.path.exists("data"):
-    os.makedirs("data")
+if not os.path.exists(DB_DIR):
+    os.makedirs(DB_DIR)
+
+def migrate_db(conn):
+    """Lead Dev Fix: Automatically adds missing columns to existing database."""
+    cursor = conn.cursor()
+    # Get existing columns
+    cursor.execute("PRAGMA table_info(signals)")
+    columns = [column[1] for column in cursor.fetchall()]
+    
+    # Check for missing columns and add them
+    required_columns = {
+        "signal_type": "TEXT",
+        "sl": "REAL",
+        "tp": "REAL"
+    }
+    
+    for col_name, col_type in required_columns.items():
+        if col_name not in columns:
+            print(f"Migrating: Adding column {col_name} to signals table.")
+            cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
+    
+    conn.commit()
 
 def run_nexus_cycle():
     # 1. Fetch
@@ -33,35 +55,33 @@ def run_nexus_cycle():
     X_train = X[:-1]
     model.partial_fit(X_train, y, classes=[0, 1])
     
-    # Probability of price going UP
     prob_up = float(model.predict_proba(X[-1].reshape(1,-1))[0][1])
     
-    # Determine Signal Type
+    # Logic for Long/Short
     signal_type = "LONG" if prob_up >= 0.5 else "SHORT"
     confidence = prob_up if prob_up >= 0.5 else (1 - prob_up)
 
-    # Calculate SL/TP (1% SL, 2% TP)
     entry = df["c"].iloc[-1]
-    if signal_type == "LONG":
-        sl = entry * 0.99
-        tp = entry * 1.02
-    else:
-        sl = entry * 1.01
-        tp = entry * 0.98
+    sl = entry * 0.99 if signal_type == "LONG" else entry * 1.01
+    tp = entry * 1.02 if signal_type == "LONG" else entry * 0.98
 
-    # 4. Persistence
+    # 4. Persistence with Migration
     conn = sqlite3.connect(DB_PATH)
-    # Lead Dev Note: Explicitly adding columns for SL, TP, and Signal
-    conn.execute('''CREATE TABLE IF NOT EXISTS signals 
-                    (timestamp TEXT, entry REAL, confidence REAL, 
-                     regime INTEGER, signal_type TEXT, sl REAL, tp REAL)''')
     
-    conn.execute("INSERT INTO signals VALUES (?, ?, ?, ?, ?, ?, ?)", 
+    # Ensure table exists first
+    conn.execute('''CREATE TABLE IF NOT EXISTS signals 
+                    (timestamp TEXT, entry REAL, confidence REAL, regime INTEGER)''')
+    
+    # Run migration to add new columns if they are missing
+    migrate_db(conn)
+    
+    conn.execute("INSERT INTO signals (timestamp, entry, confidence, regime, signal_type, sl, tp) VALUES (?, ?, ?, ?, ?, ?, ?)", 
                  (datetime.now(timezone.utc).isoformat(), entry, confidence, 
                   current_regime, signal_type, sl, tp))
+    
     conn.commit()
     conn.close()
-    print(f"Cycle Complete. {signal_type} at {entry} (Conf: {confidence:.2%})")
+    print(f"Cycle Complete: {signal_type} @ {entry}")
 
 if __name__ == "__main__":
     run_nexus_cycle()
