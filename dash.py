@@ -7,13 +7,7 @@ import time
 # --- Lead Developer Config ---
 st.set_page_config(layout="wide", page_title="Nexus HybridTrader", page_icon="📊")
 
-DB_DIR = "data"
-DB_PATH = os.path.join(DB_DIR, "trading.db")
-
-def get_db_mtime():
-    if os.path.exists(DB_PATH):
-        return os.path.getmtime(DB_PATH)
-    return 0
+DB_PATH = "data/trading.db"
 
 @st.cache_data(ttl=60)
 def load_data(mtime):
@@ -30,53 +24,47 @@ def load_data(mtime):
         st.error(f"Database Error: {e}")
         return pd.DataFrame()
 
-# --- UI Layout ---
 st.title("📊 Nexus HybridTrader Dashboard")
 
-current_mtime = get_db_mtime()
-signals = load_data(current_mtime)
+signals = load_data(os.path.getmtime(DB_PATH) if os.path.exists(DB_PATH) else 0)
 
 if not signals.empty:
-    # Header Metrics
     latest = signals.iloc[0]
     
+    # 1. Key Metrics Row
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Current Entry", f"${latest['entry']:,.2f}")
+    m1.metric("Entry Price", f"${latest['entry']:,.2f}")
     
-    # Color logic for Signal Type
-    signal_color = "normal" if latest['signal_type'] == "LONG" else "inverse"
-    m2.metric("Signal", latest['signal_type'], delta=None)
+    sig_delta = "Bullish" if latest['signal_type'] == "LONG" else "Bearish"
+    m2.metric("Signal Type", latest['signal_type'], delta=sig_delta)
     
-    m3.metric("Stop Loss", f"${latest['sl']:,.2f}")
-    m4.metric("Take Profit", f"${latest['tp']:,.2f}")
+    m3.metric("Stop Loss (ATR Adj)", f"${latest['sl']:,.2f}")
+    m4.metric("Take Profit (ATR Adj)", f"${latest['tp']:,.2f}")
 
     st.divider()
 
+    # 2. Main Analytics
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        st.subheader("Signal History & Confidence Trend")
-        # Visualizing confidence over time
-        chart_data = signals.set_index('timestamp')['confidence'].sort_index()
-        st.line_chart(chart_data)
+        st.subheader("Confidence & Volatility Trend")
+        # Line chart showing Confidence vs ATR
+        st.line_chart(signals.set_index('timestamp')[['confidence', 'atr']])
         
-        st.subheader("Detailed Logs")
-        # Prettifying the table for display
-        display_df = signals.copy()
-        display_df['timestamp'] = display_df['timestamp'].dt.strftime('%m-%d %H:%M')
-        st.dataframe(display_df, use_container_width=True)
+        st.subheader("Signal Log")
+        st.dataframe(signals.style.highlight_max(axis=0, subset=['confidence']), use_container_width=True)
 
     with col2:
-        st.subheader("Model Insights")
-        st.write(f"**Current Confidence:** {latest['confidence']:.2%}")
-        st.progress(latest['confidence'])
+        st.subheader("Market State (Stable HMM)")
+        regime_labels = {0: "Low Vol / Calm", 1: "Medium Vol", 2: "High Vol / Stress"}
+        current_label = regime_labels.get(latest['regime'], "Unknown")
+        st.info(f"Current State: **{current_label}**")
         
         st.subheader("Regime Distribution")
-        regime_counts = signals["regime"].value_counts().sort_index()
-        st.bar_chart(regime_counts)
-        
-        if st.button("Clear Cache & Refresh"):
+        st.bar_chart(signals["regime"].value_counts())
+
+        if st.button("Refresh System"):
             st.cache_data.clear()
             st.rerun()
 else:
-    st.info("Waiting for the next GitHub Action cycle to populate enhanced data...")
+    st.warning("Nexus System Initializing... check back after the next GitHub Action cycle.")
