@@ -4,7 +4,7 @@ import requests
 import ccxt
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import SGDClassifier
+from sklearn.linear_model import SGDClassifier, PassiveAggressiveRegressor
 from hmmlearn.hmm import GaussianHMM
 from datetime import datetime, timezone
 
@@ -22,10 +22,8 @@ def migrate_db(conn):
     columns = [column[1] for column in cursor.fetchall()]
     
     required_columns = {
-        "signal_type": "TEXT",
-        "sl": "REAL",
-        "tp": "REAL",
-        "atr": "REAL" # Added ATR for volatility tracking
+        "signal_type": "TEXT", "sl": "REAL", "tp": "REAL", 
+        "atr": "REAL", "pred_move": "REAL"
     }
     
     for col_name, col_type in required_columns.items():
@@ -36,50 +34,52 @@ def migrate_db(conn):
 def run_nexus_cycle():
     # 1. Fetch High-Precision Data
     exchange = ccxt.gateio()
-    ohlcv = exchange.fetch_ohlcv("BTC/USDT", "1h", limit=200)
+    ohlcv = exchange.fetch_ohlcv("BTC/USDT", "1h", limit=250)
     df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])
     
-    # Calculate Returns and ATR (Volatility)
+    # Feature Engineering
     df["ret"] = df["c"].pct_change().fillna(0)
-    high_low = df["h"] - df["l"]
-    high_close = (df["h"] - df["c"].shift()).abs()
-    low_close = (df["l"] - df["c"].shift()).abs()
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = ranges.max(axis=1)
-    df["atr"] = true_range.rolling(14).mean().fillna(method='bfill')
-
+    df["volatility"] = (df["h"] - df["l"]) / df["c"]
+    
     # 2. Stable Regime Classify
-    X = df[["ret"]].values
-    hmm = GaussianHMM(n_components=3, covariance_type="full", random_state=42)
+    X = df[["ret", "volatility"]].values
+    hmm = GaussianHMM(n_components=3, random_state=42)
     hmm.fit(X)
-    
-    # Lead Dev Fix: Sort regimes by variance so 0 is always 'Low Vol'
     regime_map = np.argsort(np.diagonal(hmm.covars_).mean(axis=1).flatten())
-    raw_regimes = hmm.predict(X)
-    # Map the raw output to our stable labels
-    stable_regimes = [np.where(regime_map == r)[0][0] for r in raw_regimes]
-    current_regime = int(stable_regimes[-1])
+    current_regime = int(np.where(regime_map == hmm.predict(X)[-1])[0][0])
     
-    # 3. Predict Direction
-    model = SGDClassifier(loss="log_loss")
-    y = (df["ret"].shift(-1) > 0).astype(int).values[:-1]
+    # 3. PREDICTIVE ENGINE
+    # Model A: Direction (Classifier)
+    # Model B: Magnitude (Regressor - predicting the next high/low range)
+    clf = SGDClassifier(loss="log_loss")
+    reg = PassiveAggressiveRegressor(max_iter=1000, tol=1e-3)
+    
+    y_class = (df["ret"].shift(-1) > 0).astype(int).values[:-1]
+    y_reg = df["ret"].shift(-1).abs().values[:-1] # Predicting absolute magnitude of move
+    
     X_train = X[:-1]
-    model.partial_fit(X_train, y, classes=[0, 1])
+    clf.partial_fit(X_train, y_class, classes=[0, 1])
+    reg.partial_fit(X_train, y_reg)
     
-    prob_up = float(model.predict_proba(X[-1].reshape(1,-1))[0][1])
+    # Forecasts for the NEXT candle
+    next_x = X[-1].reshape(1, -1)
+    prob_up = float(clf.predict_proba(next_x)[0][1])
+    predicted_magnitude = float(reg.predict(next_x)[0])
+    
     signal_type = "LONG" if prob_up >= 0.5 else "SHORT"
     confidence = prob_up if prob_up >= 0.5 else (1 - prob_up)
 
-    # 4. Volatility-Adjusted Risk (2x ATR for SL, 4x ATR for TP)
+    # 4. Predictive Risk Management
+    # Instead of ATR, we use the model's predicted magnitude for the next candle
     entry = df["c"].iloc[-1]
-    current_atr = df["atr"].iloc[-1]
+    expected_move_price = entry * predicted_magnitude
     
     if signal_type == "LONG":
-        sl = entry - (current_atr * 2)
-        tp = entry + (current_atr * 4)
+        tp = entry + (expected_move_price * 1.5) # Aim for 1.5x the predicted move
+        sl = entry - expected_move_price         # Stop at 1x the predicted move
     else:
-        sl = entry + (current_atr * 2)
-        tp = entry - (current_atr * 4)
+        tp = entry - (expected_move_price * 1.5)
+        sl = entry + expected_move_price
 
     # 5. Persistence
     conn = sqlite3.connect(DB_PATH)
@@ -87,14 +87,14 @@ def run_nexus_cycle():
                     (timestamp TEXT, entry REAL, confidence REAL, regime INTEGER)''')
     migrate_db(conn)
     
-    conn.execute("""INSERT INTO signals (timestamp, entry, confidence, regime, signal_type, sl, tp, atr) 
+    conn.execute("""INSERT INTO signals (timestamp, entry, confidence, regime, signal_type, sl, tp, pred_move) 
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", 
                  (datetime.now(timezone.utc).isoformat(), entry, confidence, 
-                  current_regime, signal_type, sl, tp, current_atr))
+                  current_regime, signal_type, sl, tp, predicted_magnitude))
     
     conn.commit()
     conn.close()
-    print(f"Cycle Complete: {signal_type} | Regime: {current_regime} | ATR: {current_atr:.2f}")
+    print(f"Forecasted {signal_type} with {predicted_magnitude:.2%} expected move.")
 
 if __name__ == "__main__":
     run_nexus_cycle()
