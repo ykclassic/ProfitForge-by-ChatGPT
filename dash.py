@@ -2,69 +2,50 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import os
-import time
 
 # --- Lead Developer Config ---
-st.set_page_config(layout="wide", page_title="Nexus HybridTrader", page_icon="📊")
+st.set_page_config(layout="wide", page_title="Nexus Predictive", page_icon="🔮")
 
 DB_PATH = "data/trading.db"
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def load_data(mtime):
-    if not os.path.exists(DB_PATH):
-        return pd.DataFrame()
-    try:
-        conn = sqlite3.connect(DB_PATH, timeout=20)
-        df = pd.read_sql("SELECT * FROM signals ORDER BY timestamp DESC", conn)
-        conn.close()
-        if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-        return df
-    except Exception as e:
-        st.error(f"Database Error: {e}")
-        return pd.DataFrame()
+    if not os.path.exists(DB_PATH): return pd.DataFrame()
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql("SELECT * FROM signals ORDER BY timestamp DESC", conn)
+    conn.close()
+    return df
 
-st.title("📊 Nexus HybridTrader Dashboard")
+st.title("🔮 Nexus Predictive Forecasting")
 
-signals = load_data(os.path.getmtime(DB_PATH) if os.path.exists(DB_PATH) else 0)
-
-if not signals.empty:
-    latest = signals.iloc[0]
-    
-    # 1. Key Metrics Row
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Entry Price", f"${latest['entry']:,.2f}")
-    
-    sig_delta = "Bullish" if latest['signal_type'] == "LONG" else "Bearish"
-    m2.metric("Signal Type", latest['signal_type'], delta=sig_delta)
-    
-    m3.metric("Stop Loss (ATR Adj)", f"${latest['sl']:,.2f}")
-    m4.metric("Take Profit (ATR Adj)", f"${latest['tp']:,.2f}")
-
-    st.divider()
-
-    # 2. Main Analytics
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.subheader("Confidence & Volatility Trend")
-        # Line chart showing Confidence vs ATR
-        st.line_chart(signals.set_index('timestamp')[['confidence', 'atr']])
+if os.path.exists(DB_PATH):
+    signals = load_data(os.path.getmtime(DB_PATH))
+    if not signals.empty:
+        latest = signals.iloc[0]
         
-        st.subheader("Signal Log")
-        st.dataframe(signals.style.highlight_max(axis=0, subset=['confidence']), use_container_width=True)
+        # Predictive Metrics
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Predicted Direction", latest['signal_type'])
+        c2.metric("Confidence", f"{latest['confidence']:.2%}")
+        # Displaying the predicted magnitude from our Regressor
+        if 'pred_move' in latest:
+            c3.metric("Forecasted Move", f"±{latest['pred_move']:.2%}")
+        c4.metric("Regime", f"State {latest['regime']}")
 
-    with col2:
-        st.subheader("Market State (Stable HMM)")
-        regime_labels = {0: "Low Vol / Calm", 1: "Medium Vol", 2: "High Vol / Stress"}
-        current_label = regime_labels.get(latest['regime'], "Unknown")
-        st.info(f"Current State: **{current_label}**")
+        st.divider()
         
-        st.subheader("Regime Distribution")
-        st.bar_chart(signals["regime"].value_counts())
-
-        if st.button("Refresh System"):
-            st.cache_data.clear()
-            st.rerun()
+        st.subheader("Forecasted Trade Levels")
+        t1, t2, t3 = st.columns(3)
+        t1.info(f"Entry: **${latest['entry']:,.2f}**")
+        t2.error(f"Stop Loss: **${latest['sl']:,.2f}**")
+        t3.success(f"Take Profit: **${latest['tp']:,.2f}**")
+        
+        st.subheader("Historical Accuracy (Confidence Trend)")
+        st.line_chart(signals.set_index('timestamp')['confidence'])
+        
+        st.subheader("Full Nexus Logs")
+        st.dataframe(signals, use_container_width=True)
+    else:
+        st.info("Synchronizing with GitHub Actions...")
 else:
-    st.warning("Nexus System Initializing... check back after the next GitHub Action cycle.")
+    st.warning("Database not found. Trigger the GitHub Action to begin.")
