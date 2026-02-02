@@ -3,26 +3,34 @@ name: Run Nexus Trader
 on:
   schedule:
     - cron: '20 * * * *'
-  workflow_dispatch: # Allows you to click "Run Workflow" manually
+  workflow_dispatch:
+
+# Add this at the workflow level for automatic retry
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   run_trainer:
-    # We specify 'ubuntu-latest' to ensure we get the most available runner type
     runs-on: ubuntu-latest
-    timeout-minutes: 10 # Prevents the job from hanging and blocking future runs
+    timeout-minutes: 10
+    
+    # Add retries for runner acquisition failures
+    retry-on-error: true
+    continue-on-error: false
     
     permissions:
-      contents: write # CRITICAL: Allows the bot to save the database back to GitHub
+      contents: write
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4 # Updated to v4 for better stability
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # Stable version for GitHub Runners
-          cache: 'pip' # Speeds up future runs
+          python-version: '3.11'
+          cache: 'pip'
 
       - name: Install Dependencies
         run: pip install pandas ccxt scikit-learn hmmlearn requests
