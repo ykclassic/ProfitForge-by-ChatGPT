@@ -5,19 +5,17 @@ on:
     - cron: '20 * * * *'
   workflow_dispatch:
 
-# Add this at the workflow level for automatic retry
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   run_trainer:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     
-    # Add retries for runner acquisition failures
-    retry-on-error: true
-    continue-on-error: false
+    # Add this strategy section
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
+      max-parallel: 1
+      fail-fast: false
     
     permissions:
       contents: write
