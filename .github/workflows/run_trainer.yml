@@ -1,82 +1,41 @@
-name: Nexus Trader with Alerts
+Looking at the workflow YAML, I can see the error. The issue is on line 55, which is:
 
-on:
-  schedule:
-    - cron: '*/20 * * * *'
-  workflow_dispatch:
+```yaml
+if: always()
+```
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+The problem: In GitHub Actions, the always() function requires the ${{ }} expression syntax when used in if conditions. You're missing the expression syntax markers.
 
-jobs:
-  run_trainer:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 8
+Fix it by changing line 55 to:
 
-    permissions:
-      contents: write
+```yaml
+if: ${{ always() }}
+```
 
-    env:
-      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-      JOB_STATUS: ${{ job.status }}
+Here's why this happens:
 
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+1. always() is a GitHub Actions context function that returns true whether the previous steps succeeded or failed
+2. Without ${{ }}, GitHub tries to parse it as a literal string, which causes a syntax error
+3. The ${{ }} syntax tells GitHub to evaluate it as an expression
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
+The corrected section should look like:
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      - name: Debug files
-        run: ls -R
-
-      - name: Test Discord Webhook
-        run: python test_webhook.py || echo "Webhook test failed, continuing..."
-
-      - name: Run Trainer Engine
-        id: trainer
-        run: |
-          echo "Starting trainer..."
-          python trainer_daemon.py
-          EXIT_CODE=$?
-          echo "TRAINER_EXIT_CODE=$EXIT_CODE" >> $GITHUB_ENV
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-
+```yaml
       - name: Send Completion Alert
-        if: always()
+        if: ${{ always() }}
         run: python send_alert.py
+```
 
-      - name: Check Database Changes
-        id: check-db
-        if: steps.trainer.outcome == 'success'
-        run: |
-          mkdir -p data
-          if [ ! -f "data/trading.db" ]; then
-            echo "changes=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          git status --porcelain data/trading.db > db_status.txt
-          if [ -s db_status.txt ]; then
-            echo "changes=true" >> $GITHUB_OUTPUT
-          else
-            echo "changes=false" >> $GITHUB_OUTPUT
-          fi
+Additional note: You should also fix line 60 for consistency (though it might work without ${{ }} since it's a simpler comparison):
 
-      - name: Commit and Push Changes
-        if: steps.trainer.outcome == 'success' && steps.check-db.outputs.changes == 'true'
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add data/trading.db
-          git commit -m "🤖 Nexus Update $(date -u +"%Y-%m-%d %H:%M UTC")" || exit 0
-          git pull --rebase
-          git push
+```yaml
+if: ${{ steps.trainer.outcome == 'success' }}
+```
+
+And line 75:
+
+```yaml
+if: ${{ steps.trainer.outcome == 'success' && steps.check-db.outputs.changes == 'true' }}
+```
+
+This will resolve the YAML syntax error and make your workflow run correctly.
