@@ -2,27 +2,39 @@ name: Run Nexus Trader
 
 on:
   schedule:
-    - cron: '20 * * * *'
-  workflow_dispatch:
+    - cron: '25 * * * *'  # Changed from 20 to avoid peak times
+  workflow_dispatch: # Allows manual triggering
 
 jobs:
   run_trainer:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Use specific version instead of latest for better availability
+    runs-on: ubuntu-22.04
+    # Reduced timeout to prevent blocking
+    timeout-minutes: 8
     
-    # Add this strategy section
-    strategy:
-      matrix:
-        runner: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
-      max-parallel: 1
-      fail-fast: false
+    # Add concurrency control to prevent overlapping runs
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
     
     permissions:
-      contents: write
+      contents: write # Allows saving database back to repo
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1 # Shallow clone for faster checkout
+
+      - name: Cache Python Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.local/lib/python3.11/site-packages
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}-${{ hashFiles('trainer_daemon.py') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,17 +43,48 @@ jobs:
           cache: 'pip'
 
       - name: Install Dependencies
-        run: pip install pandas ccxt scikit-learn hmmlearn requests
+        run: |
+          pip install --upgrade pip
+          pip install pandas ccxt scikit-learn hmmlearn requests
+        # Install only if not cached
+        continue-on-error: false
 
       - name: Run Trainer Engine
         run: python trainer_daemon.py
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          PYTHONUNBUFFERED: 1
 
       - name: Save Database to Repository
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add data/trading.db
-          git commit -m "Nexus Sync: Update Database [skip ci]" || echo "No changes"
-          git push
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          # Check if there are changes to commit
+          if git diff --quiet data/trading.db; then
+            echo "No changes to database"
+          else
+            git add data/trading.db
+            git commit -m "Nexus Sync: Automated database update [skip ci]"
+            git pull --rebase
+            git push
+          fi
+
+      - name: Cleanup Runner Resources (Always Run)
+        if: always()
+        run: |
+          # Clear pip cache
+          pip cache purge
+          # Remove unnecessary files
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          # Clean apt cache
+          sudo apt-get clean
+          # Remove temporary files
+          sudo rm -rf /tmp/*
+          # Clear Python bytecode
+          find . -name "*.pyc" -delete
+          find . -name "__pycache__" -type d -delete
+          # Report disk usage
+          df -h
+          echo "Cleanup completed successfully"
