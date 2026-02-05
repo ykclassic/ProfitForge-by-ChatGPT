@@ -1,41 +1,41 @@
-Looking at the workflow YAML, I can see the error. The issue is on line 55, which is:
+name: Run Nexus Trader
 
-```yaml
-if: always()
-```
+on:
+  schedule:
+    - cron: '20 * * * *'
+  workflow_dispatch: # Allows you to click "Run Workflow" manually
 
-The problem: In GitHub Actions, the always() function requires the ${{ }} expression syntax when used in if conditions. You're missing the expression syntax markers.
+jobs:
+  run_trainer:
+    # We specify 'ubuntu-latest' to ensure we get the most available runner type
+    runs-on: ubuntu-latest
+    timeout-minutes: 10 # Prevents the job from hanging and blocking future runs
+    
+    permissions:
+      contents: write # CRITICAL: Allows the bot to save the database back to GitHub
 
-Fix it by changing line 55 to:
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4 # Updated to v4 for better stability
 
-```yaml
-if: ${{ always() }}
-```
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' # Stable version for GitHub Runners
+          cache: 'pip' # Speeds up future runs
 
-Here's why this happens:
+      - name: Install Dependencies
+        run: pip install pandas ccxt scikit-learn hmmlearn requests
 
-1. always() is a GitHub Actions context function that returns true whether the previous steps succeeded or failed
-2. Without ${{ }}, GitHub tries to parse it as a literal string, which causes a syntax error
-3. The ${{ }} syntax tells GitHub to evaluate it as an expression
+      - name: Run Trainer Engine
+        run: python trainer_daemon.py
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
 
-The corrected section should look like:
-
-```yaml
-      - name: Send Completion Alert
-        if: ${{ always() }}
-        run: python send_alert.py
-```
-
-Additional note: You should also fix line 60 for consistency (though it might work without ${{ }} since it's a simpler comparison):
-
-```yaml
-if: ${{ steps.trainer.outcome == 'success' }}
-```
-
-And line 75:
-
-```yaml
-if: ${{ steps.trainer.outcome == 'success' && steps.check-db.outputs.changes == 'true' }}
-```
-
-This will resolve the YAML syntax error and make your workflow run correctly.
+      - name: Save Database to Repository
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add data/trading.db
+          git commit -m "Nexus Sync: Update Database [skip ci]" || echo "No changes"
+          git push
