@@ -2,8 +2,11 @@ import sqlite3
 import os
 import requests
 import ccxt
-from datetime import datetime
+from datetime import datetime, timezone
 
+# =============================
+# CONFIG
+# =============================
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 DB_PATH = "data/trading.db"
 
@@ -14,6 +17,47 @@ SYMBOLS = [
 
 os.makedirs("data", exist_ok=True)
 
+# =============================
+# SCHEMA MIGRATION (OPTION A)
+# =============================
+def get_columns(cursor, table):
+    cursor.execute(f"PRAGMA table_info({table})")
+    return [row[1] for row in cursor.fetchall()]
+
+def migrate_signals_schema(conn):
+    cursor = conn.cursor()
+
+    # Base table (minimal, backward-compatible)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT
+        )
+    """)
+
+    existing = get_columns(cursor, "signals")
+
+    required_columns = {
+        "symbol": "TEXT",
+        "signal_type": "TEXT",
+        "entry": "REAL",
+        "sl": "REAL",
+        "tp": "REAL",
+        "confidence": "REAL",
+        "outcome": "TEXT"
+    }
+
+    for col, col_type in required_columns.items():
+        if col not in existing:
+            cursor.execute(
+                f"ALTER TABLE signals ADD COLUMN {col} {col_type}"
+            )
+
+    conn.commit()
+
+# =============================
+# OUTCOME CHECKING
+# =============================
 def check_previous_outcomes(exchange, conn):
     cursor = conn.cursor()
 
@@ -27,33 +71,33 @@ def check_previous_outcomes(exchange, conn):
     recent_trades = cursor.fetchall()
 
     for rowid, symbol, side, sl, tp, entry in recent_trades:
+        if not symbol or not side:
+            continue
+
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, "1h", limit=2)
 
             if not ohlcv or len(ohlcv) < 2:
-                print(f"No OHLCV data for {symbol}")
                 continue
 
             high = ohlcv[-1][2]
             low = ohlcv[-1][3]
-            current_price = ohlcv[-1][4]
+            close = ohlcv[-1][4]
 
             status = None
 
             if side == "LONG":
                 if low <= sl:
-                    status = "❌ STOP LOSS HIT"
+                    status = "STOP_LOSS"
                 elif high >= tp:
-                    status = "✅ TAKE PROFIT HIT"
-            else:  # SHORT
+                    status = "TAKE_PROFIT"
+            elif side == "SHORT":
                 if high >= sl:
-                    status = "❌ STOP LOSS HIT"
+                    status = "STOP_LOSS"
                 elif low <= tp:
-                    status = "✅ TAKE PROFIT HIT"
+                    status = "TAKE_PROFIT"
 
             if status:
-                print(f"{symbol} outcome: {status}")
-
                 cursor.execute(
                     "UPDATE signals SET outcome = ? WHERE rowid = ?",
                     (status, rowid)
@@ -62,28 +106,24 @@ def check_previous_outcomes(exchange, conn):
 
                 if DISCORD_WEBHOOK:
                     msg = (
-                        f"🔔 **Trade Outcome: {symbol}**\n"
+                        f"🔔 **Trade Outcome**\n"
+                        f"Symbol: {symbol}\n"
                         f"Result: {status}\n"
-                        f"Entry: ${entry:,.4f} | Final Price: ${current_price:,.4f}"
+                        f"Entry: ${entry:,.4f}\n"
+                        f"Last Price: ${close:,.4f}"
                     )
-                    requests.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=10)
+                    requests.post(
+                        DISCORD_WEBHOOK,
+                        json={"content": msg},
+                        timeout=10
+                    )
 
         except Exception as e:
-            print(f"Error checking outcome for {symbol}: {e}")
+            print(f"[WARN] Outcome check failed for {symbol}: {e}")
 
-def send_discord_report(top_pick, all_signals):
-    if not DISCORD_WEBHOOK:
-        return
-
-    report = f"🚀 **Nexus Alpha Report: {datetime.utcnow().strftime('%H:%M UTC')}**\n\n"
-    report += f"🔥 **TOP PICK:** {top_pick['symbol']} | {top_pick['signal_type']} ({top_pick['confidence']:.2%} Conf)\n"
-    report += f"🎯 TP: ${top_pick['tp']:,.4f} | SL: ${top_pick['sl']:,.4f}\n\n"
-    report += "**Other Signals:** " + ", ".join(
-        [f"{s['symbol']} ({s['signal_type']})" for s in all_signals[:5]]
-    )
-
-    requests.post(DISCORD_WEBHOOK, json={"content": report}, timeout=10)
-
+# =============================
+# MAIN CYCLE
+# =============================
 def run_nexus_cycle():
     exchange = ccxt.gateio({
         "enableRateLimit": True,
@@ -91,9 +131,10 @@ def run_nexus_cycle():
     })
 
     with sqlite3.connect(DB_PATH) as conn:
+        migrate_signals_schema(conn)
         check_previous_outcomes(exchange, conn)
 
-    print("Nexus cycle completed successfully.")
+    print("✅ Nexus cycle completed successfully.")
 
 if __name__ == "__main__":
     run_nexus_cycle()
