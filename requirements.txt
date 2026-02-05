@@ -10,7 +10,6 @@ ta
 streamlit-autorefresh
 shap
 lifelines
-pandas-ta
 xgboost
 scikit-learn
 hmmlearn
