@@ -20,10 +20,19 @@ SYMBOLS = [
 os.makedirs("data", exist_ok=True)
 
 # =============================
-# SCHEMA MIGRATION
+# SCHEMA REPAIR ENGINE
 # =============================
 def migrate_signals_schema(conn):
     cursor = conn.cursor()
+    try:
+        # Check if 'id' exists by trying to select it
+        cursor.execute("SELECT id FROM signals LIMIT 1")
+    except sqlite3.OperationalError:
+        print("⚠️ Schema mismatch detected (missing 'id'). Rebuilding table...")
+        # Rename old table to preserve data just in case, or just drop it
+        cursor.execute("DROP TABLE IF EXISTS signals_old")
+        cursor.execute("ALTER TABLE signals RENAME TO signals_old")
+        
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS signals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,7 +43,7 @@ def migrate_signals_schema(conn):
             sl REAL,
             tp REAL,
             confidence REAL,
-            outcome TEXT,
+            outcome TEXT DEFAULT 'PENDING',
             pred_move REAL
         )
     """)
@@ -45,11 +54,11 @@ def migrate_signals_schema(conn):
 # =============================
 def check_previous_outcomes(exchange, conn):
     cursor = conn.cursor()
-    # Look back at the last 3 hours of signals that are still 'PENDING'
+    # Using 'id' safely now
     cursor.execute("""
         SELECT id, symbol, signal_type, sl, tp, entry
         FROM signals
-        WHERE (outcome IS NULL OR outcome = 'PENDING')
+        WHERE outcome = 'PENDING'
         AND timestamp > datetime('now', '-3 hours')
     """)
     recent_trades = cursor.fetchall()
@@ -57,6 +66,7 @@ def check_previous_outcomes(exchange, conn):
     for db_id, symbol, side, sl, tp, entry in recent_trades:
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, "1h", limit=2)
+            if not ohlcv: continue
             high, low, close = ohlcv[-1][2], ohlcv[-1][3], ohlcv[-1][4]
             status = None
 
@@ -70,8 +80,8 @@ def check_previous_outcomes(exchange, conn):
             if status:
                 cursor.execute("UPDATE signals SET outcome = ? WHERE id = ?", (status, db_id))
                 if DISCORD_WEBHOOK:
-                    msg = f"🔔 **Trade Update: {symbol}**\nResult: {status}\nEntry: ${entry:,.4f} | Exit: ${close:,.4f}"
-                    requests.post(DISCORD_WEBHOOK, json={"content": msg})
+                    msg = f"🔔 **Nexus Outcome: {symbol}**\nResult: {status}\nEntry: ${entry:,.4f} | Exit: ${close:,.4f}"
+                    requests.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=5)
         except: continue
     conn.commit()
 
@@ -81,35 +91,32 @@ def check_previous_outcomes(exchange, conn):
 def run_nexus_cycle():
     exchange = ccxt.gateio({"enableRateLimit": True})
     conn = sqlite3.connect(DB_PATH)
+    
+    # 1. Fix Schema
     migrate_signals_schema(conn)
     
-    # 1. Clean up old trades first
+    # 2. Check Outcomes
     check_previous_outcomes(exchange, conn)
     
-    current_signals = []
+    # 3. Generate Signals
     ts = datetime.now(timezone.utc).isoformat()
-
-    # 2. Generate New Signals
     for symbol in SYMBOLS:
         try:
-            # Fetch fresh data (params to bypass cache)
-            ohlcv = exchange.fetch_ohlcv(symbol, "1h", limit=200, params={'nonce': exchange.milliseconds()})
+            ohlcv = exchange.fetch_ohlcv(symbol, "1h", limit=100)
             df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])
             
-            # Feature Engineering
             df["ret"] = df["c"].pct_change().fillna(0)
             df["vol"] = (df["h"] - df["l"]) / df["c"]
             X = df[["ret", "vol"]].values
             X_scaled = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-6)
 
-            # Simple ML Logic
+            # Train micro-models
             y_class = (df["ret"].shift(-1) > 0).astype(int).values[:-1]
             y_reg = df["ret"].shift(-1).abs().values[:-1]
 
             clf = SGDClassifier(loss="log_loss").fit(X_scaled[:-1], y_class)
             reg = PassiveAggressiveRegressor().fit(X_scaled[:-1], y_reg)
 
-            # Prediction
             last_feat = X_scaled[-1].reshape(1, -1)
             prob_up = float(clf.predict_proba(last_feat)[0][1])
             pred_mag = float(reg.predict(last_feat)[0])
@@ -118,29 +125,21 @@ def run_nexus_cycle():
             conf = prob_up if side == "LONG" else (1 - prob_up)
             entry = df["c"].iloc[-1]
             
-            # SL/TP calculation
-            move = entry * max(pred_mag, 0.005) # Min 0.5% move
+            move = entry * max(pred_mag, 0.008) 
             sl = (entry - move) if side == "LONG" else (entry + move)
             tp = (entry + move * 1.5) if side == "LONG" else (entry - move * 1.5)
 
-            # Insert into DB
             conn.execute("""
                 INSERT INTO signals (timestamp, symbol, signal_type, entry, sl, tp, confidence, outcome, pred_move)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (ts, symbol, side, entry, sl, tp, conf, 'PENDING', pred_mag))
-            
-            current_signals.append({"symbol": symbol, "side": side, "conf": conf})
 
         except Exception as e:
-            print(f"❌ Error processing {symbol}: {e}")
+            print(f"Error on {symbol}: {e}")
 
     conn.commit()
     conn.close()
-    
-    # Force Git to see the change by updating the file timestamp
-    os.utime(DB_PATH, None)
-    
-    print(f"✅ Nexus cycle completed. Generated {len(current_signals)} signals.")
+    print(f"✅ Cycle Finished. File updated: {os.path.getsize(DB_PATH)} bytes")
 
 if __name__ == "__main__":
     run_nexus_cycle()
