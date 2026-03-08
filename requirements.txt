@@ -15,3 +15,4 @@ scikit-learn
 hmmlearn
 river
 requests
+sqlite3
