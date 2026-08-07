@@ -13,7 +13,7 @@ def check_outcomes():
         print("No database found. Skipping monitor.")
         return
 
-    exchange = ccxt.gateio({"enableRateLimit": True})
+    exchange = ccxt.gate({"enableRateLimit": True})
     
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
