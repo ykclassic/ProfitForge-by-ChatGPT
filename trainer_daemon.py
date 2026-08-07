@@ -60,7 +60,7 @@ def migrate_signals_schema(conn):
 # =============================
 def run_nexus_cycle():
     # Using Gate.io for consistent OHLCV data
-    exchange = ccxt.gateio({"enableRateLimit": True})
+    exchange = ccxt.gate({"enableRateLimit": True})
     
     with sqlite3.connect(DB_PATH) as conn:
         migrate_signals_schema(conn)
