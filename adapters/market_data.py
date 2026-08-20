@@ -68,21 +68,44 @@ def timeframe_to_ms(timeframe: str) -> int:
 
 
 class BitgetMarketDataAdapter(MarketDataAdapter):
-    """Primary Bitget public market-data adapter."""
+    """Primary Bitget public market-data adapter with bounded requests."""
 
     exchange_id = "bitget"
+    DEFAULT_TIMEOUT_MS = 10_000
 
-    def __init__(self) -> None:
-        self.exchange = ccxt.bitget({"enableRateLimit": True})
+    def __init__(self, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> None:
+        if timeout_ms <= 0:
+            raise ValueError("timeout_ms must be greater than zero")
+
+        self.exchange = ccxt.bitget(
+            {
+                "enableRateLimit": True,
+                "timeout": timeout_ms,
+            }
+        )
+        self._markets_loaded = False
+
+    def _ensure_markets_loaded(self) -> None:
+        if self._markets_loaded:
+            return
+        try:
+            self.exchange.load_markets()
+        except Exception as exc:
+            raise MarketDataError(f"Bitget market metadata load failed: {exc}") from exc
+        self._markets_loaded = True
 
     def fetch_closed_ohlcv(
         self, symbol: str, timeframe: str, limit: int
     ) -> list[Candle]:
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+
         if not self.exchange.has.get("fetchOHLCV"):
             raise MarketDataError("Bitget does not advertise fetchOHLCV support.")
 
+        self._ensure_markets_loaded()
+
         try:
-            self.exchange.load_markets()
             raw = self.exchange.fetch_ohlcv(
                 symbol,
                 timeframe,
