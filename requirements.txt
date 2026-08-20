@@ -1,4 +1,4 @@
-﻿streamlit
+streamlit
 pandas
 numpy
 requests
@@ -14,4 +14,4 @@ xgboost
 scikit-learn
 hmmlearn
 river
-requests
+pytest
