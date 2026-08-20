@@ -1,67 +1,45 @@
--- CORE
-CREATE TABLE IF NOT EXISTS models (
-    id SERIAL PRIMARY KEY,
-    name TEXT,
-    version TEXT,
-    algorithm TEXT,
-    trained_at TIMESTAMPTZ,
-    data_window INTEGER
+-- Canonical ProfitForge SQLite schema.
+-- db/db_handler.py is the sole database owner and applies migrations.
+-- PostgreSQL-specific types from the previous prototype are intentionally gone.
+
+CREATE TABLE IF NOT EXISTS signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_key TEXT,
+    timestamp TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    signal_type TEXT NOT NULL,
+    timeframe TEXT NOT NULL DEFAULT '1h',
+    strategy_id TEXT NOT NULL DEFAULT 'baseline_ml_v1',
+    candle_timestamp_ms INTEGER,
+    candle_closed INTEGER NOT NULL DEFAULT 1,
+    entry REAL NOT NULL,
+    sl REAL NOT NULL,
+    tp REAL NOT NULL,
+    confidence REAL NOT NULL,
+    outcome TEXT NOT NULL DEFAULT 'PENDING',
+    outcome_price REAL,
+    outcome_at TEXT,
+    pred_move REAL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    exchange TEXT NOT NULL DEFAULT 'bitget',
+    risk_per_trade REAL,
+    risk_amount_usdt REAL,
+    position_size REAL
 );
 
--- SIGNALS
-CREATE TABLE IF NOT EXISTS trading_signals (
-    id SERIAL PRIMARY KEY,
-    timestamp TIMESTAMPTZ,
-    symbol TEXT,
-    direction TEXT,
-    confidence REAL,
-    status TEXT DEFAULT 'NEW'
-);
+CREATE INDEX IF NOT EXISTS idx_signals_symbol_status
+    ON signals(symbol, status);
 
--- MODEL METRICS
-CREATE TABLE IF NOT EXISTS model_metrics (
-    model_id INTEGER,
-    metric TEXT,
-    value REAL,
-    recorded_at TIMESTAMPTZ DEFAULT NOW()
-);
+CREATE INDEX IF NOT EXISTS idx_signals_expiry
+    ON signals(expires_at);
 
--- WALK-FORWARD
-CREATE TABLE IF NOT EXISTS walkforward_results (
-    model_id INTEGER,
-    train_start TIMESTAMPTZ,
-    train_end TIMESTAMPTZ,
-    test_start TIMESTAMPTZ,
-    test_end TIMESTAMPTZ,
-    accuracy REAL,
-    precision REAL,
-    recall REAL,
-    recorded_at TIMESTAMPTZ DEFAULT NOW()
-);
+CREATE INDEX IF NOT EXISTS idx_signals_candle
+    ON signals(symbol, timeframe, candle_timestamp_ms);
 
--- REGIME
-CREATE TABLE IF NOT EXISTS market_regimes (
-    timestamp TIMESTAMPTZ PRIMARY KEY,
-    symbol TEXT,
-    regime INTEGER,
-    probability REAL
-);
+CREATE INDEX IF NOT EXISTS idx_signals_created
+    ON signals(created_at);
 
--- BET SIZING
-CREATE TABLE IF NOT EXISTS bet_sizing (
-    signal_id INTEGER,
-    probability REAL,
-    kelly REAL,
-    fraction REAL,
-    capital_used REAL,
-    recorded_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- CONCEPT DRIFT
-CREATE TABLE IF NOT EXISTS concept_drift (
-    timestamp TIMESTAMPTZ,
-    model_id INTEGER,
-    metric TEXT,
-    drift_detected BOOLEAN,
-    value REAL
-);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_signals_signal_key
+    ON signals(signal_key);
