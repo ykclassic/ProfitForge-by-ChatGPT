@@ -35,9 +35,15 @@ class TradingDatabaseHandler:
 
     def _initialize_schema(self) -> None:
         schema_path = Path(__file__).with_name("schema.sql")
+        schema_text = schema_path.read_text(encoding="utf-8")
+        schema_text = "\n".join(
+            line
+            for line in schema_text.splitlines()
+            if not line.strip().startswith("--")
+        )
         schema_statements = [
             statement.strip()
-            for statement in schema_path.read_text(encoding="utf-8").split(";")
+            for statement in schema_text.split(";")
             if statement.strip()
         ]
         if not schema_statements:
