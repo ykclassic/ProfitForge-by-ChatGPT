@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -121,15 +122,23 @@ def test_expired_signal_is_marked_expired(tmp_path):
     assert row["status"] == "EXPIRED"
 
 
-def test_monitor_exits_without_market_data_when_no_active_signals(tmp_path, monkeypatch):
+def test_monitor_exits_without_market_data_when_no_active_signals(
+    tmp_path, monkeypatch
+):
     import monitor_trades
 
     db_path = tmp_path / "trading.db"
-    monkeypatch.setattr(monitor_trades.CONFIG, "db_path", db_path)
+    monkeypatch.setattr(
+        monitor_trades,
+        "CONFIG",
+        replace(monitor_trades.CONFIG, db_path=db_path),
+    )
     monkeypatch.setattr(
         monitor_trades,
         "create_market_data_adapter",
-        lambda _: pytest.fail("market data must not be requested without active signals"),
+        lambda _: pytest.fail(
+            "market data must not be requested without active signals"
+        ),
     )
 
     monitor_trades.check_outcomes()
@@ -168,11 +177,17 @@ def test_monitor_expires_stale_active_signal_before_market_data(
         }
     )
 
-    monkeypatch.setattr(monitor_trades.CONFIG, "db_path", db_path)
+    monkeypatch.setattr(
+        monitor_trades,
+        "CONFIG",
+        replace(monitor_trades.CONFIG, db_path=db_path),
+    )
     monkeypatch.setattr(
         monitor_trades,
         "create_market_data_adapter",
-        lambda _: pytest.fail("expired signals must not trigger market-data requests"),
+        lambda _: pytest.fail(
+            "expired signals must not trigger market-data requests"
+        ),
     )
 
     monitor_trades.check_outcomes()
