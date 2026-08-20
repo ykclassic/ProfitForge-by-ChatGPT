@@ -35,7 +35,7 @@ SIGNAL_VALIDITY_BARS = int(os.getenv("SIGNAL_VALIDITY_BARS", "1"))
 # Risk sizing is paper/research-only until an execution gateway is explicitly enabled.
 # No live order is placed by this P0 implementation.
 RISK_PER_TRADE = _env_float("RISK_PER_TRADE", 0.0075)
-ACCOUNT_EQUITY_USDT = _env_float("ACCOUNT_EQUITY_USDT", 0.0)
+ACCOUNT_EQUITY_USDT = _env_float("ACCOUNT_EQUITY_USDT", 10000.0)
 
 MIN_STOP_DISTANCE_PCT = _env_float("MIN_STOP_DISTANCE_PCT", 0.008)
 REWARD_RISK_RATIO = _env_float("REWARD_RISK_RATIO", 1.5)
