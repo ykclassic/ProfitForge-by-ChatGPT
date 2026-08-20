@@ -15,7 +15,17 @@ ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "trading.db"
 
-MARKET_DATA_EXCHANGE_ID = os.getenv("MARKET_DATA_EXCHANGE_ID", "bitget").strip().lower()
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return float(raw)
+
+
+MARKET_DATA_EXCHANGE_ID = os.getenv(
+    "MARKET_DATA_EXCHANGE_ID", "bitget"
+).strip().lower()
 EXECUTION_EXCHANGE_ID = os.getenv("EXECUTION_EXCHANGE_ID", "").strip().lower() or None
 
 TIMEFRAME = os.getenv("SIGNAL_TIMEFRAME", "1h")
@@ -24,11 +34,11 @@ SIGNAL_VALIDITY_BARS = int(os.getenv("SIGNAL_VALIDITY_BARS", "1"))
 
 # Risk sizing is paper/research-only until an execution gateway is explicitly enabled.
 # No live order is placed by this P0 implementation.
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.0075"))
-ACCOUNT_EQUITY_USDT = float(os.getenv("ACCOUNT_EQUITY_USDT", "0"))
+RISK_PER_TRADE = _env_float("RISK_PER_TRADE", 0.0075)
+ACCOUNT_EQUITY_USDT = _env_float("ACCOUNT_EQUITY_USDT", 0.0)
 
-MIN_STOP_DISTANCE_PCT = float(os.getenv("MIN_STOP_DISTANCE_PCT", "0.008"))
-REWARD_RISK_RATIO = float(os.getenv("REWARD_RISK_RATIO", "1.5"))
+MIN_STOP_DISTANCE_PCT = _env_float("MIN_STOP_DISTANCE_PCT", 0.008)
+REWARD_RISK_RATIO = _env_float("REWARD_RISK_RATIO", 1.5)
 
 STRATEGY_ID = os.getenv("STRATEGY_ID", "baseline_ml_v1")
 
