@@ -1,0 +1,1 @@
+"""Canonical ProfitForge database package."""
