@@ -38,6 +38,10 @@ jobs:
         run: |
           python -m compileall -q trainer_daemon.py monitor_trades.py config.py adapters db risk notifications
 
+      - name: Run P0 unit tests
+        run: |
+          pytest -q tests/test_p0_hardening.py
+
       - name: Run canonical signal cycle
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
