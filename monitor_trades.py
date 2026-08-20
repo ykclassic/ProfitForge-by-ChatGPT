@@ -1,72 +1,146 @@
-import sqlite3
-import os
-import ccxt
-from notifications.discord import send_discord_signal
-from datetime import datetime
+from __future__ import annotations
 
-# --- CONFIG ---
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
-DB_PATH = "data/trading.db"
+"""Outcome monitor for ProfitForge signals.
 
-def check_outcomes():
-    if not os.path.exists(DB_PATH):
-        print("No database found. Skipping monitor.")
+P0 uses only fully closed Bitget candles. It never uses a live ticker to decide
+whether a historical signal hit SL/TP, because ticker snapshots cannot reliably
+establish intra-candle ordering.
+"""
+
+from datetime import datetime, timezone
+
+from adapters.market_data import create_market_data_adapter
+from config import CONFIG
+from db.db_handler import TradingDatabaseHandler
+from notifications.discord import send_discord_outcome
+
+
+def check_outcomes() -> None:
+    db = TradingDatabaseHandler(CONFIG.db_path)
+    adapter = create_market_data_adapter(CONFIG.market_data_exchange_id)
+
+    active_signals = db.get_active_signals()
+    if not active_signals:
+        print("No active signals to monitor.")
         return
 
-    exchange = ccxt.gate({"enableRateLimit": True})
-    
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        # Only fetch trades that are still 'PENDING'
-        cursor.execute("""
-            SELECT id, symbol, signal_type, entry, sl, tp 
-            FROM signals 
-            WHERE outcome = 'PENDING'
-        """)
-        active_trades = cursor.fetchall()
+    now = datetime.now(timezone.utc)
+    closed_count = 0
+    expired_count = 0
+    ambiguous_count = 0
+    errors = 0
 
-        if not active_trades:
-            print("No active pending trades to monitor.")
-            return
+    for signal in active_signals:
+        try:
+            if not signal["candle_closed"]:
+                db.mark_signal_outcome(
+                    signal["id"],
+                    outcome="REJECTED_DATA",
+                    outcome_price=None,
+                    outcome_at=now.isoformat(),
+                    status="REJECTED",
+                )
+                continue
 
-        for db_id, symbol, side, entry, sl, tp in active_trades:
-            try:
-                ticker = exchange.fetch_ticker(symbol)
-                last_price = ticker['last']
-                status = None
+            expires_at = datetime.fromisoformat(
+                signal["expires_at"].replace("Z", "+00:00")
+            )
 
-                # Logic for LONG
-                if side == "LONG":
-                    if last_price <= sl: status = "STOP_LOSS"
-                    elif last_price >= tp: status = "TAKE_PROFIT"
-                
-                # Logic for SHORT
+            candles = adapter.fetch_closed_ohlcv(
+                signal["symbol"],
+                signal["timeframe"],
+                CONFIG.ohlcv_limit,
+            )
+
+            post_signal = [
+                candle
+                for candle in candles
+                if candle.timestamp_ms > signal["candle_timestamp_ms"]
+                and candle.close_datetime <= expires_at
+            ]
+
+            resolved = False
+            for candle in post_signal:
+                if signal["signal_type"] == "LONG":
+                    hit_sl = candle.low <= signal["sl"]
+                    hit_tp = candle.high >= signal["tp"]
                 else:
-                    if last_price >= sl: status = "STOP_LOSS"
-                    elif last_price <= tp: status = "TAKE_PROFIT"
+                    hit_sl = candle.high >= signal["sl"]
+                    hit_tp = candle.low <= signal["tp"]
 
-                if status:
-                    # Update Database
-                    cursor.execute("UPDATE signals SET outcome = ? WHERE id = ?", (status, db_id))
-                    print(f"🎯 {symbol} hit {status} at ${last_price}")
+                if hit_sl and hit_tp:
+                    db.mark_signal_outcome(
+                        signal["id"],
+                        outcome="AMBIGUOUS",
+                        outcome_price=None,
+                        outcome_at=candle.close_datetime.isoformat(),
+                        status="CLOSED_AMBIGUOUS",
+                    )
+                    ambiguous_count += 1
+                    resolved = True
+                    break
 
-                    # Send Alert
-                    if DISCORD_WEBHOOK:
-                        # Re-using your discord module with a 'Result' flavor
-                        from requests import post
-                        msg = {
-                            "content": (
-                                f"🏁 **TRADE CLOSED: {symbol}**\n"
-                                f"**Result:** {status} {'✅' if status == 'TAKE_PROFIT' else '❌'}\n"
-                                f"**Entry:** ${entry:,.4f}\n"
-                                f"**Exit Price:** ${last_price:,.4f}"
-                            )
-                        }
-                        post(DISCORD_WEBHOOK, json=msg)
-            except Exception as e:
-                print(f"Error monitoring {symbol}: {e}")
-        
-        conn.commit()
+                if hit_sl:
+                    db.mark_signal_outcome(
+                        signal["id"],
+                        outcome="STOP_LOSS",
+                        outcome_price=signal["sl"],
+                        outcome_at=candle.close_datetime.isoformat(),
+                        status="CLOSED",
+                    )
+                    closed_count += 1
+                    resolved = True
+                    if CONFIG.discord_webhook:
+                        send_discord_outcome(
+                            CONFIG.discord_webhook,
+                            signal,
+                            "STOP_LOSS",
+                            signal["sl"],
+                        )
+                    break
+
+                if hit_tp:
+                    db.mark_signal_outcome(
+                        signal["id"],
+                        outcome="TAKE_PROFIT",
+                        outcome_price=signal["tp"],
+                        outcome_at=candle.close_datetime.isoformat(),
+                        status="CLOSED",
+                    )
+                    closed_count += 1
+                    resolved = True
+                    if CONFIG.discord_webhook:
+                        send_discord_outcome(
+                            CONFIG.discord_webhook,
+                            signal,
+                            "TAKE_PROFIT",
+                            signal["tp"],
+                        )
+                    break
+
+            if not resolved and now >= expires_at:
+                db.mark_signal_outcome(
+                    signal["id"],
+                    outcome="EXPIRED",
+                    outcome_price=None,
+                    outcome_at=now.isoformat(),
+                    status="EXPIRED",
+                )
+                expired_count += 1
+
+        except Exception as exc:
+            errors += 1
+            print(
+                f"❌ Error monitoring signal {signal['id']} "
+                f"{signal['symbol']}: {exc}"
+            )
+
+    print(
+        "✅ Outcome monitor finished: "
+        f"closed={closed_count}, expired={expired_count}, "
+        f"ambiguous={ambiguous_count}, errors={errors}"
+    )
+
 
 if __name__ == "__main__":
     check_outcomes()

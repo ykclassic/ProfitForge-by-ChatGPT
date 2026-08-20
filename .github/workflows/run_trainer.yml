@@ -1,54 +1,76 @@
-name: Nexus Trainer Cycle
+name: ProfitForge Canonical Hourly Cycle
 
 on:
-  workflow_dispatch:
   schedule:
-    # Runs at 20 minutes past every hour (UTC)
-    - cron: "20 * * * *" 
+    - cron: "20 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: profitforge-canonical-hourly-cycle
+  cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
-  trainer:
+  cycle:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    
-    permissions:
-      contents: write # Essential for pushing the .db file back
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Ensures full history for a clean push
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: 'pip'
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas ccxt scikit-learn hmmlearn requests
+          pip install -r requirements.txt
 
-      - name: Initialize data directory
-        run: mkdir -p data
+      - name: Validate Python compilation
+        run: |
+          python -m compileall -q trainer_daemon.py monitor_trades.py config.py adapters db risk notifications
 
-      - name: Run Nexus Predictive Engine
+      - name: Run P0 unit tests
+        run: |
+          pytest -q tests/test_p0_hardening.py
+
+      - name: Run canonical signal cycle
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          ACCOUNT_EQUITY_USDT: ${{ secrets.ACCOUNT_EQUITY_USDT || '0' }}
+          RISK_PER_TRADE: ${{ vars.RISK_PER_TRADE || '0.0075' }}
         run: |
-          echo "🚀 Starting Predictive Cycle at $(date -u)"
-          # We run the script once per trigger to ensure data is saved immediately
           python trainer_daemon.py
-          echo "✅ Cycle Complete"
 
-      - name: Commit and Push Database
-        if: always() # Ensures data is saved even if the python script has a partial error
+      - name: Monitor active signals
+        if: always()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          ACCOUNT_EQUITY_USDT: ${{ secrets.ACCOUNT_EQUITY_USDT || '0' }}
+          RISK_PER_TRADE: ${{ vars.RISK_PER_TRADE || '0.0075' }}
+        run: |
+          python monitor_trades.py
+
+      - name: Persist canonical database
+        if: always()
         run: |
           git config --local user.name "github-actions[bot]"
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add data/trading.db
-          # [skip ci] prevents the push from triggering a recursive loop
-          git commit -m "Nexus Data Sync: $(date -u) [skip ci]" || echo "No changes to commit"
-          git push origin main
+
+          if git diff --cached --quiet; then
+            echo "No database changes to commit."
+            exit 0
+          fi
+
+          git commit -m "ProfitForge: sync canonical trading database [skip ci]"
+          git push origin HEAD:${GITHUB_REF_NAME}
