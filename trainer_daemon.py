@@ -16,7 +16,6 @@ This module does not place live orders.
 import warnings
 from datetime import datetime, timezone
 
-import numpy as np
 import pandas as pd
 from sklearn.linear_model import SGDClassifier, SGDRegressor
 from sklearn.preprocessing import StandardScaler
