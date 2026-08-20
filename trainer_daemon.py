@@ -13,6 +13,7 @@ P0 responsibilities:
 This module does not place live orders.
 """
 
+import math
 import warnings
 from datetime import datetime, timezone
 
@@ -130,6 +131,16 @@ def run_nexus_cycle() -> None:
 
             df = _to_dataframe(candles)
             probability_up, predicted_magnitude = _build_models(df)
+
+            if not (
+                math.isfinite(probability_up)
+                and math.isfinite(predicted_magnitude)
+                and 0.0 <= probability_up <= 1.0
+            ):
+                raise ValueError(
+                    f"Non-finite model output for {symbol}: "
+                    f"probability={probability_up}, magnitude={predicted_magnitude}"
+                )
 
             side = "LONG" if probability_up > 0.5 else "SHORT"
             confidence = probability_up if side == "LONG" else 1.0 - probability_up
