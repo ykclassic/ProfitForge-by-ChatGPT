@@ -69,4 +69,4 @@ jobs:
           fi
 
           git commit -m "ProfitForge: sync canonical trading database [skip ci]"
-          git push origin HEAD:main
+          git push origin HEAD:${GITHUB_REF_NAME}
