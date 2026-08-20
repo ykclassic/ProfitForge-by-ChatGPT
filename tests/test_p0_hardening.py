@@ -119,3 +119,64 @@ def test_expired_signal_is_marked_expired(tmp_path):
     row = db.get_latest_signal_status("ETH/USDT")
     assert row["outcome"] == "EXPIRED"
     assert row["status"] == "EXPIRED"
+
+
+def test_monitor_exits_without_market_data_when_no_active_signals(tmp_path, monkeypatch):
+    import monitor_trades
+
+    db_path = tmp_path / "trading.db"
+    monkeypatch.setattr(monitor_trades.CONFIG, "db_path", db_path)
+    monkeypatch.setattr(
+        monitor_trades,
+        "create_market_data_adapter",
+        lambda _: pytest.fail("market data must not be requested without active signals"),
+    )
+
+    monitor_trades.check_outcomes()
+
+
+def test_monitor_expires_stale_active_signal_before_market_data(
+    tmp_path, monkeypatch
+):
+    import monitor_trades
+
+    db_path = tmp_path / "trading.db"
+    db = TradingDatabaseHandler(db_path)
+    db.insert_signal(
+        {
+            "signal_key": "stale-monitor-test",
+            "timestamp": "2026-08-20T08:00:00+00:00",
+            "symbol": "BTC/USDT",
+            "signal_type": "LONG",
+            "timeframe": "1h",
+            "strategy_id": "baseline_ml_v1",
+            "candle_timestamp_ms": 123,
+            "candle_closed": 1,
+            "entry": 100,
+            "sl": 99,
+            "tp": 101.5,
+            "confidence": 0.75,
+            "outcome": "PENDING",
+            "pred_move": 0.01,
+            "created_at": "2026-08-20T08:00:00+00:00",
+            "expires_at": "2026-08-20T09:00:00+00:00",
+            "status": "ACTIVE",
+            "exchange": "bitget",
+            "risk_per_trade": 0.0075,
+            "risk_amount_usdt": 75,
+            "position_size": 75,
+        }
+    )
+
+    monkeypatch.setattr(monitor_trades.CONFIG, "db_path", db_path)
+    monkeypatch.setattr(
+        monitor_trades,
+        "create_market_data_adapter",
+        lambda _: pytest.fail("expired signals must not trigger market-data requests"),
+    )
+
+    monitor_trades.check_outcomes()
+
+    row = db.get_latest_signal_status("BTC/USDT")
+    assert row["outcome"] == "EXPIRED"
+    assert row["status"] == "EXPIRED"
