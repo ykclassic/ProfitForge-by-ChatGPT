@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import pytest
 
 from research.event_backtester import BacktestConfig, BacktestSignal, run_event_backtest
 from research.feature_engine import FeatureConfig, build_canonical_features
@@ -51,24 +50,42 @@ def test_feature_engine_has_canonical_structure_volatility_and_liquidity_feature
     assert len(features) == len(df)
 
 
-def test_mtf_features_are_backward_aligned_without_future_fill():
-    base = _candles(120)
-    higher = _candles(120, step=4 * 3_600_000)
-    higher.loc[higher.index[-1], "close"] = 999999.0
+def test_mtf_features_use_only_completed_higher_timeframe_candles():
+    base = _candles(12, step=3_600_000)
+    higher = _candles(4, step=4 * 3_600_000)
+    higher["close"] = [100.0, 110.0, 120.0, 999999.0]
 
+    cfg = FeatureConfig(
+        ema_fast=2,
+        ema_slow=2,
+        atr_period=2,
+        adx_period=2,
+        rsi_period=2,
+        bb_period=2,
+        structure_lookback=2,
+        liquidity_lookback=2,
+    )
     features = build_canonical_features(
         base,
         informative={"4h": higher},
-        cfg=FeatureConfig(),
+        cfg=cfg,
+        base_timeframe="1h",
     )
 
-    assert "4h_ema_slow_dist" in features.columns
-    # The future higher-timeframe row cannot be projected backward into base rows.
-    assert not np.isclose(
-        features.iloc[0]["4h_ema_slow_dist"],
-        higher.iloc[-1]["close"],
-        equal_nan=False,
-    )
+    # At the close of the 01:00 base candle, the 04:00 higher candle has not
+    # closed, so its 110 close cannot appear in the feature vector.
+    row_at_1h_close = features.iloc[1]
+    assert not np.isclose(row_at_1h_close["4h_return_1"], 0.1)
+
+    # At the close of the 05:00 base candle, the 04:00 higher candle is complete
+    # and is therefore eligible for backward as-of alignment.
+    row_at_5h_close = features.iloc[5]
+    assert np.isclose(row_at_5h_close["4h_return_1"], 0.1)
+
+    # The 08:00 higher candle is still open at the 08:00 base close boundary;
+    # its future 999999 close must not be visible.
+    row_at_8h_close = features.iloc[8]
+    assert not np.isclose(row_at_8h_close["4h_ema_slow_dist"], 999999.0)
 
 
 def test_trade_outcome_label_is_not_next_candle_direction():
