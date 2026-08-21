@@ -39,7 +39,6 @@ from risk.risk_manager import RiskValidationError, calculate_position_size
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-
 FEATURE_CONFIG = FeatureConfig()
 
 
@@ -63,16 +62,12 @@ def _build_outcome_model(
     base_df: pd.DataFrame,
     informative: dict[str, pd.DataFrame],
 ):
-    """Train the baseline classifier on net trade outcomes only.
-
-    Every training row's label is generated from bars strictly after that row.
-    The latest base candle is therefore used only for prediction, never as a
-    training label.
-    """
+    """Train the baseline classifier on net trade outcomes only."""
     features = build_canonical_features(
         base_df,
         informative=informative,
         cfg=FEATURE_CONFIG,
+        base_timeframe=CONFIG.timeframe,
     )
     labels = label_trade_outcomes(
         base_df,
@@ -91,9 +86,7 @@ def _build_outcome_model(
     train = dataset.loc[train_mask].copy()
 
     if len(train) < 30:
-        raise ValueError(
-            f"Insufficient point-in-time labeled history: {len(train)} rows."
-        )
+        raise ValueError(f"Insufficient point-in-time labeled history: {len(train)} rows.")
 
     X = train[columns].to_numpy(dtype=float)
     y = train["trade_outcome"].to_numpy(dtype=int)
@@ -123,14 +116,10 @@ def _build_outcome_model(
     predicted_class = int(classes[best_index])
     confidence = float(probabilities[best_index])
 
-    return predicted_class, confidence, latest.iloc[0], train["trade_net_return"].mean()
+    return predicted_class, confidence, latest.iloc[0], float(train["trade_net_return"].mean())
 
 
-def _signal_expiry(
-    candle_timestamp_ms: int,
-    timeframe_ms: int,
-    validity_bars: int,
-) -> datetime:
+def _signal_expiry(candle_timestamp_ms: int, timeframe_ms: int, validity_bars: int) -> datetime:
     candle_close_ms = candle_timestamp_ms + timeframe_ms
     expiry_ms = candle_close_ms + timeframe_ms * validity_bars
     return datetime.fromtimestamp(expiry_ms / 1000, tz=timezone.utc)
@@ -145,7 +134,6 @@ def run_nexus_cycle() -> None:
     risk_blocked = 0
     errors = 0
     neutral_skipped = 0
-
     timeframe_ms = timeframe_to_ms(CONFIG.timeframe)
 
     for symbol in CONFIG.symbols:
@@ -171,9 +159,6 @@ def run_nexus_cycle() -> None:
                 )
 
             base_df = _to_dataframe(base_candles)
-
-            # The adapter guarantees closed candles. Recheck the invariant here
-            # so a future adapter cannot silently violate the trading contract.
             now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
             latest = base_candles[-1]
             if latest.timestamp_ms + timeframe_ms > now_ms:
@@ -201,7 +186,6 @@ def run_nexus_cycle() -> None:
 
             side = "LONG" if predicted_class == 1 else "SHORT"
             entry = float(latest.close)
-
             atr_pct = float(latest_features["atr_pct"])
             stop_distance_pct = max(atr_pct, CONFIG.min_stop_distance_pct)
             if not math.isfinite(stop_distance_pct) or stop_distance_pct <= 0:
@@ -285,11 +269,7 @@ def run_nexus_cycle() -> None:
 
             generated += 1
 
-            if (
-                status == "ACTIVE"
-                and CONFIG.discord_webhook
-                and position_size is not None
-            ):
+            if status == "ACTIVE" and CONFIG.discord_webhook and position_size is not None:
                 send_discord_signal(
                     CONFIG.discord_webhook,
                     symbol,
