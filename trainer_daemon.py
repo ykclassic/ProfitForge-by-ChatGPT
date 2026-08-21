@@ -10,6 +10,13 @@ P0 responsibilities:
 - attach an explicit expiry;
 - calculate risk and position size before a signal can become ACTIVE.
 
+P1 strategy-integrity responsibilities:
+- build features through one canonical feature engine;
+- align multiple closed timeframes point-in-time;
+- interpret trend, volatility, structure and liquidity regimes;
+- train on trade-outcome labels rather than next-candle direction;
+- include research fees and slippage in those labels.
+
 This module does not place live orders.
 """
 
@@ -17,84 +24,102 @@ import math
 import warnings
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
-from sklearn.linear_model import SGDClassifier, SGDRegressor
+from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 
 from adapters.market_data import create_market_data_adapter, timeframe_to_ms
 from config import CONFIG
 from db.db_handler import TradingDatabaseHandler
 from notifications.discord import send_discord_signal
+from research.feature_engine import FeatureConfig, build_canonical_features, feature_columns
+from research.outcome_labeler import OutcomeLabelConfig, label_trade_outcomes
 from risk.risk_manager import RiskValidationError, calculate_position_size
 
 warnings.filterwarnings("ignore", category=FutureWarning)
+
+FEATURE_CONFIG = FeatureConfig()
 
 
 def _to_dataframe(candles) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
-                "ts": candle.timestamp_ms,
-                "o": candle.open,
-                "h": candle.high,
-                "l": candle.low,
-                "c": candle.close,
-                "v": candle.volume,
+                "timestamp_ms": candle.timestamp_ms,
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+                "volume": candle.volume,
             }
             for candle in candles
         ]
     )
 
 
-def _build_models(df: pd.DataFrame):
-    """Train the existing baseline models without adding a new strategy."""
-    df = df.copy()
-    df["ret"] = df["c"].pct_change().fillna(0.0)
-    df["vol"] = (df["h"] - df["l"]) / df["c"]
+def _build_outcome_model(
+    base_df: pd.DataFrame,
+    informative: dict[str, pd.DataFrame],
+):
+    """Train the baseline classifier on net trade outcomes only."""
+    features = build_canonical_features(
+        base_df,
+        informative=informative,
+        cfg=FEATURE_CONFIG,
+        base_timeframe=CONFIG.timeframe,
+    )
+    labels = label_trade_outcomes(
+        base_df,
+        OutcomeLabelConfig(
+            horizon_bars=CONFIG.research_max_hold_bars,
+            stop_distance_pct=CONFIG.min_stop_distance_pct,
+            reward_risk_ratio=CONFIG.reward_risk_ratio,
+            fee_bps_per_side=CONFIG.research_fee_bps_per_side,
+            slippage_bps_per_side=CONFIG.research_slippage_bps_per_side,
+        ),
+    )
 
-    feature_columns = ["ret", "vol"]
-    supervised = df.iloc[:-1].copy()
+    columns = feature_columns(features)
+    dataset = pd.concat([features, labels], axis=1)
+    train_mask = dataset[columns].notna().all(axis=1) & dataset["trade_exit_bar"].ge(0)
+    train = dataset.loc[train_mask].copy()
 
-    if len(supervised) < 20:
-        raise ValueError("Insufficient closed-candle history for model training.")
+    if len(train) < 30:
+        raise ValueError(f"Insufficient point-in-time labeled history: {len(train)} rows.")
 
-    X = supervised[feature_columns].to_numpy(dtype=float)
-    y_class = (
-        df["ret"].shift(-1).iloc[:-1].to_numpy(dtype=float) > 0
-    ).astype(int)
-    y_reg = df["ret"].shift(-1).abs().iloc[:-1].to_numpy(dtype=float)
+    X = train[columns].to_numpy(dtype=float)
+    y = train["trade_outcome"].to_numpy(dtype=int)
+    if len(np.unique(y)) < 2:
+        raise ValueError("Trade-outcome labels contain fewer than two classes.")
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-
-    clf = SGDClassifier(loss="log_loss", random_state=42)
-    clf.fit(X_scaled, y_class)
-
-    reg = SGDRegressor(
-        loss="epsilon_insensitive",
-        learning_rate="pa1",
-        eta0=1.0,
-        epsilon=0.01,
+    classifier = SGDClassifier(
+        loss="log_loss",
+        alpha=0.0001,
+        max_iter=2000,
+        tol=1e-4,
         random_state=42,
+        class_weight="balanced",
     )
-    reg.fit(X_scaled, y_reg)
+    classifier.fit(X_scaled, y)
 
-    latest = df.iloc[-1]
-    latest_features = scaler.transform(
-        [[float(latest["ret"]), float(latest["vol"])] ]
-    )
+    latest = features.iloc[[-1]]
+    if latest[columns].isna().any(axis=None):
+        raise ValueError("Latest canonical feature vector contains unavailable values.")
 
-    probability_up = float(clf.predict_proba(latest_features)[0][1])
-    predicted_magnitude = float(reg.predict(latest_features)[0])
+    latest_scaled = scaler.transform(latest[columns].to_numpy(dtype=float))
+    probabilities = classifier.predict_proba(latest_scaled)[0]
+    classes = classifier.classes_
+    best_index = int(np.argmax(probabilities))
+    predicted_class = int(classes[best_index])
+    confidence = float(probabilities[best_index])
 
-    return probability_up, predicted_magnitude
+    return predicted_class, confidence, latest.iloc[0], float(train["trade_net_return"].mean())
 
 
-def _signal_expiry(
-    candle_timestamp_ms: int,
-    timeframe_ms: int,
-    validity_bars: int,
-) -> datetime:
+def _signal_expiry(candle_timestamp_ms: int, timeframe_ms: int, validity_bars: int) -> datetime:
     candle_close_ms = candle_timestamp_ms + timeframe_ms
     expiry_ms = candle_close_ms + timeframe_ms * validity_bars
     return datetime.fromtimestamp(expiry_ms / 1000, tz=timezone.utc)
@@ -108,49 +133,65 @@ def run_nexus_cycle() -> None:
     duplicates = 0
     risk_blocked = 0
     errors = 0
-
+    neutral_skipped = 0
     timeframe_ms = timeframe_to_ms(CONFIG.timeframe)
 
     for symbol in CONFIG.symbols:
         try:
-            candles = adapter.fetch_closed_ohlcv(
+            base_candles = adapter.fetch_closed_ohlcv(
                 symbol,
                 CONFIG.timeframe,
                 CONFIG.ohlcv_limit,
             )
-
-            if not candles:
+            if not base_candles:
                 raise ValueError("No closed candles returned.")
 
-            # The adapter guarantees closed candles. Recheck the invariant here
-            # so a future adapter cannot silently violate the trading contract.
+            informative: dict[str, pd.DataFrame] = {}
+            for timeframe in CONFIG.mtf_timeframes:
+                if timeframe == CONFIG.timeframe:
+                    continue
+                informative[timeframe] = _to_dataframe(
+                    adapter.fetch_closed_ohlcv(
+                        symbol,
+                        timeframe,
+                        CONFIG.mtf_ohlcv_limit,
+                    )
+                )
+
+            base_df = _to_dataframe(base_candles)
             now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-            latest = candles[-1]
+            latest = base_candles[-1]
             if latest.timestamp_ms + timeframe_ms > now_ms:
                 raise ValueError(f"Latest candle for {symbol} is not fully closed.")
 
-            df = _to_dataframe(candles)
-            probability_up, predicted_magnitude = _build_models(df)
+            predicted_class, confidence, latest_features, mean_labeled_return = _build_outcome_model(
+                base_df,
+                informative,
+            )
+
+            if predicted_class == 0:
+                neutral_skipped += 1
+                print(f"ℹ️ No positive trade-outcome edge for {symbol}; signal skipped.")
+                continue
 
             if not (
-                math.isfinite(probability_up)
-                and math.isfinite(predicted_magnitude)
-                and 0.0 <= probability_up <= 1.0
+                math.isfinite(confidence)
+                and 0.0 <= confidence <= 1.0
+                and predicted_class in (-1, 1)
             ):
                 raise ValueError(
-                    f"Non-finite model output for {symbol}: "
-                    f"probability={probability_up}, magnitude={predicted_magnitude}"
+                    f"Invalid outcome-model output for {symbol}: "
+                    f"class={predicted_class}, confidence={confidence}"
                 )
 
-            side = "LONG" if probability_up > 0.5 else "SHORT"
-            confidence = probability_up if side == "LONG" else 1.0 - probability_up
+            side = "LONG" if predicted_class == 1 else "SHORT"
             entry = float(latest.close)
+            atr_pct = float(latest_features["atr_pct"])
+            stop_distance_pct = max(atr_pct, CONFIG.min_stop_distance_pct)
+            if not math.isfinite(stop_distance_pct) or stop_distance_pct <= 0:
+                raise ValueError(f"Invalid ATR-derived stop distance for {symbol}")
 
-            # Preserve the current baseline stop model for P0, but move the
-            # account-risk calculation into the dedicated risk layer.
-            move = entry * max(
-                abs(predicted_magnitude), CONFIG.min_stop_distance_pct
-            )
+            move = entry * stop_distance_pct
             stop_loss = entry - move if side == "LONG" else entry + move
             take_profit = (
                 entry + move * CONFIG.reward_risk_ratio
@@ -180,7 +221,6 @@ def run_nexus_cycle() -> None:
                 position_size = sized.quantity
                 risk_amount = sized.risk_amount_usdt
             except RiskValidationError as exc:
-                # Do not invent an account balance or position size.
                 status = "RISK_BLOCKED"
                 outcome = "REJECTED_RISK"
                 risk_blocked += 1
@@ -208,7 +248,7 @@ def run_nexus_cycle() -> None:
                     "tp": take_profit,
                     "confidence": confidence,
                     "outcome": outcome,
-                    "pred_move": predicted_magnitude,
+                    "pred_move": mean_labeled_return,
                     "created_at": signal_timestamp.isoformat(),
                     "expires_at": expires_at.isoformat(),
                     "status": status,
@@ -229,11 +269,7 @@ def run_nexus_cycle() -> None:
 
             generated += 1
 
-            if (
-                status == "ACTIVE"
-                and CONFIG.discord_webhook
-                and position_size is not None
-            ):
+            if status == "ACTIVE" and CONFIG.discord_webhook and position_size is not None:
                 send_discord_signal(
                     CONFIG.discord_webhook,
                     symbol,
@@ -251,7 +287,8 @@ def run_nexus_cycle() -> None:
     print(
         "✅ Cycle finished: "
         f"generated={generated}, duplicates_suppressed={duplicates}, "
-        f"risk_blocked={risk_blocked}, errors={errors}"
+        f"risk_blocked={risk_blocked}, neutral_skipped={neutral_skipped}, "
+        f"errors={errors}"
     )
 
 
