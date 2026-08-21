@@ -4,6 +4,7 @@ on:
   schedule:
     - cron: "20 * * * *"
   workflow_dispatch:
+  pull_request:
 
 concurrency:
   group: profitforge-canonical-hourly-cycle
@@ -47,6 +48,7 @@ jobs:
           pytest -q tests/test_p1_strategy_integrity.py
 
       - name: Run canonical signal cycle
+        if: github.event_name != 'pull_request'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           ACCOUNT_EQUITY_USDT: ${{ secrets.ACCOUNT_EQUITY_USDT || '0' }}
@@ -55,7 +57,7 @@ jobs:
           python trainer_daemon.py
 
       - name: Monitor active signals
-        if: always()
+        if: github.event_name != 'pull_request' && always()
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           ACCOUNT_EQUITY_USDT: ${{ secrets.ACCOUNT_EQUITY_USDT || '0' }}
@@ -64,7 +66,7 @@ jobs:
           python monitor_trades.py
 
       - name: Persist canonical database
-        if: always()
+        if: github.event_name != 'pull_request' && always()
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
