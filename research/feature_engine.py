@@ -2,10 +2,10 @@ from __future__ import annotations
 
 """Canonical, point-in-time feature engine for ProfitForge research.
 
-The engine produces deterministic features from closed OHLCV candles only.
-Higher-timeframe features are merged with ``merge_asof`` using backward
-alignment, so a base-timeframe row can only see the most recent completed
-informative candle.
+Features are calculated from completed candles. Multi-timeframe alignment is
+performed on candle-close timestamps, not candle-open timestamps, so a higher
+timeframe candle cannot leak its eventual close into lower-timeframe rows that
+occurred while that candle was still forming.
 """
 
 from dataclasses import dataclass
@@ -28,6 +28,20 @@ class FeatureConfig:
 
 
 REQUIRED_COLUMNS = {"timestamp_ms", "open", "high", "low", "close", "volume"}
+
+
+def _timeframe_to_ms(timeframe: str) -> int:
+    if not timeframe or len(timeframe) < 2:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    units = {"s": 1_000, "m": 60_000, "h": 3_600_000, "d": 86_400_000, "w": 604_800_000}
+    try:
+        value = int(timeframe[:-1])
+    except ValueError as exc:
+        raise ValueError(f"Unsupported timeframe: {timeframe}") from exc
+    unit = timeframe[-1]
+    if value <= 0 or unit not in units:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    return value * units[unit]
 
 
 def _validate_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -105,7 +119,6 @@ def _single_timeframe_features(df: pd.DataFrame, cfg: FeatureConfig, prefix: str
     frame[f"{prefix}adx"] = _adx(frame, cfg.adx_period)
     frame[f"{prefix}bb_width"] = bb_width
 
-    # Market structure: signals are based only on prior completed swings.
     frame[f"{prefix}bos_up"] = (close > rolling_high).astype(float)
     frame[f"{prefix}bos_down"] = (close < rolling_low).astype(float)
     frame[f"{prefix}structure_bias"] = np.select(
@@ -114,7 +127,6 @@ def _single_timeframe_features(df: pd.DataFrame, cfg: FeatureConfig, prefix: str
         default=0.0,
     )
 
-    # Liquidity features: distance to prior extremes, volume anomaly and sweep.
     volume_mean = volume.rolling(cfg.liquidity_lookback, min_periods=cfg.liquidity_lookback).mean()
     volume_std = volume.rolling(cfg.liquidity_lookback, min_periods=cfg.liquidity_lookback).std(ddof=0)
     frame[f"{prefix}volume_z"] = (volume - volume_mean) / volume_std.replace(0, np.nan)
@@ -123,7 +135,6 @@ def _single_timeframe_features(df: pd.DataFrame, cfg: FeatureConfig, prefix: str
     frame[f"{prefix}sweep_high"] = ((high > rolling_high) & (close < rolling_high)).astype(float)
     frame[f"{prefix}sweep_low"] = ((low < rolling_low) & (close > rolling_low)).astype(float)
 
-    # Regime interpretation is deliberately deterministic rather than a new strategy.
     trend_up = (close > ema_slow) & (frame[f"{prefix}adx"] >= 25)
     trend_down = (close < ema_slow) & (frame[f"{prefix}adx"] >= 25)
     high_vol = frame[f"{prefix}atr_pct"] >= frame[f"{prefix}atr_pct"].rolling(100, min_periods=20).median()
@@ -140,28 +151,37 @@ def build_canonical_features(
     base: pd.DataFrame,
     informative: dict[str, pd.DataFrame] | None = None,
     cfg: FeatureConfig | None = None,
+    base_timeframe: str = "1h",
 ) -> pd.DataFrame:
-    """Build the canonical feature matrix with strict point-in-time MTF alignment.
+    """Build the canonical point-in-time feature matrix.
 
-    ``base`` is the signal timeframe. ``informative`` maps labels such as ``4h``
-    to completed OHLCV frames. No forward fill/backfill is used across timeframes.
+    Base and informative candles are timestamped by candle open. Alignment is
+    performed using ``open + timeframe_duration`` (the candle close). Thus a
+    higher-timeframe candle becomes available only after it has actually closed.
+    Backward as-of matching selects the latest completed informative candle.
     """
     cfg = cfg or FeatureConfig()
-    result = _single_timeframe_features(base, cfg)
-    result = result.sort_values("timestamp_ms").reset_index(drop=True)
+    base_frame = _single_timeframe_features(base, cfg)
+    base_duration = _timeframe_to_ms(base_timeframe)
+    result = base_frame.copy()
+    result["_decision_close_ms"] = result["timestamp_ms"] + base_duration
+    result = result.sort_values("_decision_close_ms").reset_index(drop=True)
 
     for timeframe, higher in (informative or {}).items():
-        higher_features = _single_timeframe_features(higher, cfg, prefix=f"{timeframe}_")
+        higher_features = _single_timeframe_features(higher, cfg, prefix=f"{timeframe}_").copy()
+        higher_duration = _timeframe_to_ms(timeframe)
+        higher_features["_decision_close_ms"] = higher_features["timestamp_ms"] + higher_duration
         columns = [column for column in higher_features.columns if column != "timestamp_ms"]
-        higher_features = higher_features[["timestamp_ms", *columns]].sort_values("timestamp_ms")
+        higher_features = higher_features[["_decision_close_ms", *columns]].sort_values("_decision_close_ms")
         result = pd.merge_asof(
             result,
             higher_features,
-            on="timestamp_ms",
+            on="_decision_close_ms",
             direction="backward",
             allow_exact_matches=True,
         )
 
+    result = result.drop(columns=["_decision_close_ms"])
     return result.replace([np.inf, -np.inf], np.nan)
 
 
