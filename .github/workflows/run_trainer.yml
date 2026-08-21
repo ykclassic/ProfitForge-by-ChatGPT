@@ -36,11 +36,15 @@ jobs:
 
       - name: Validate Python compilation
         run: |
-          python -m compileall -q trainer_daemon.py monitor_trades.py config.py adapters db risk notifications
+          python -m compileall -q trainer_daemon.py monitor_trades.py config.py adapters db risk notifications research
 
       - name: Run P0 unit tests
         run: |
           pytest -q tests/test_p0_hardening.py
+
+      - name: Run P1 strategy-integrity tests
+        run: |
+          pytest -q tests/test_p1_strategy_integrity.py
 
       - name: Run canonical signal cycle
         env:
